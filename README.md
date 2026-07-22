@@ -163,6 +163,84 @@ WantedBy=multi-user.target
 
 ---
 
+## Deployment auf Railway
+
+Das Repo enthält `nixpacks.toml` (Build + Default-Startbefehl) und `.python-version`.
+Auf Railway laufen **drei Bausteine im selben Projekt**, alle mit derselben
+`DATABASE_URL`:
+
+1. **PostgreSQL** – von Railway bereitgestellt.
+2. **Web-Dienst (API)** – dauerhaft, Start `uvicorn aggregator.api:app --host 0.0.0.0 --port $PORT`.
+3. **Cron-Dienst (Sync)** – stündlich, Befehl `python -m aggregator.sync`.
+
+> **Wichtig:** Die API hört auf Railways `$PORT` (nicht fest 8000) – das steckt
+> schon im Default-Startbefehl. `DATABASE_URL` wird aus den Umgebungsvariablen
+> gelesen; die Env-Variable hat Vorrang vor dem lokalen Default. Railway liefert
+> die URL als `postgresql://…` – der Code schreibt sie intern automatisch auf den
+> `postgresql+psycopg://`-Treiber um. Der erste Sync-Lauf legt die Tabellen bei
+> einer frischen DB automatisch an (`init_db()`); zusätzlich tut das auch der
+> Web-Dienst beim Start.
+
+### Schritt für Schritt (Railway-Oberfläche)
+
+**A. Projekt anlegen & GitHub-Repo verbinden**
+1. Auf **railway.app** einloggen → Button **„New Project"**.
+2. **„Deploy from GitHub repo"** wählen. Beim ersten Mal **„Configure GitHub App"**
+   klicken, Railway Zugriff auf das Repo geben, dann das Repo auswählen.
+3. Railway legt einen ersten Dienst an und startet einen Build. Das wird unser
+   **Web-Dienst**. (Dank `nixpacks.toml` verschwindet die Meldung
+   „No start command detected".)
+
+**B. PostgreSQL hinzufügen**
+1. In der Projekt-Ansicht (Canvas) oben rechts **„New"** → **„Database"** →
+   **„Add PostgreSQL"**.
+2. Es erscheint ein Dienst namens **Postgres**. Er stellt automatisch die
+   Variable **`DATABASE_URL`** bereit (interner Host `…railway.internal`).
+
+**C. `DATABASE_URL` an den Web-Dienst weiterreichen**
+1. Den **Web-Dienst** anklicken → Tab **„Variables"**.
+2. **„New Variable"** → als Namen **`DATABASE_URL`** eingeben, als Wert die
+   **Referenz** `${{ Postgres.DATABASE_URL }}` (Railway bietet beim Tippen von
+   `${{` die verbundenen Dienste zur Auswahl an; alternativ Button
+   **„Add Reference"** → Dienst **Postgres** → Variable **DATABASE_URL**).
+3. Speichern. Der Dienst deployt neu.
+
+**D. Web-Dienst öffentlich erreichbar machen**
+1. Web-Dienst → Tab **„Settings"** → Abschnitt **„Networking"** →
+   **„Generate Domain"**. Railway vergibt eine öffentliche URL.
+2. Optional: **„Settings"** → **„Deploy"** → **„Healthcheck Path"** = `/healthz`.
+3. Der Startbefehl ist über `nixpacks.toml` bereits gesetzt; ein eigener Eintrag
+   unter **„Custom Start Command"** ist für den Web-Dienst nicht nötig.
+
+**E. Zweiten Dienst für den stündlichen Sync anlegen**
+1. Zurück auf den Projekt-Canvas → **„New"** → **„GitHub Repo"** → **dasselbe Repo**
+   erneut auswählen. So entsteht ein **zweiter Dienst** aus demselben Code.
+2. Diesen Dienst z.B. in **„Settings"** → **„Service Name"** in `sync` umbenennen.
+3. Tab **„Variables"** → **`DATABASE_URL`** = `${{ Postgres.DATABASE_URL }}`
+   (wie in Schritt C).
+4. Tab **„Settings"** → **„Deploy"** → **„Custom Start Command"** =
+   `python -m aggregator.sync`.
+5. Im selben Bereich **„Cron Schedule"** = `0 * * * *` (stündlich zur vollen
+   Stunde, UTC).
+6. Der Sync-Dienst braucht **keine** öffentliche Domain (kein „Generate Domain").
+
+**F. Fertig**
+- Der Cron-Dienst läuft stündlich, holt den Bestand und aktualisiert die DB;
+  er beendet sich nach jedem Lauf (Railway startet ihn zum Zeitplan neu).
+- Der Web-Dienst liefert den Bestand unter der generierten Domain aus, z.B.
+  `https://<deine-domain>/vehicles` und `…/healthz`.
+- Ersten Sync sofort testen: den Sync-Dienst öffnen → Menü **„⋮"** /
+  **„Deploy"**-Bereich → **„Restart"** (oder „Redeploy"), dann in den **Logs**
+  die Zeile `[bhg] fetched=… inserted=…` prüfen.
+
+### Hinweise
+- Beide App-Dienste teilen sich die **eine** Postgres-Instanz über dieselbe
+  `DATABASE_URL`-Referenz.
+- Feld- und Button-Namen können sich bei Railway-Updates leicht ändern; die
+  Reihenfolge (Repo → Postgres → Variablen → Start/Cron) bleibt gleich.
+
+---
+
 ## API (für die Webseite)
 
 ```bash

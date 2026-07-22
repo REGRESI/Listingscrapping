@@ -1,0 +1,25 @@
+# Nixpacks-Build für Railway.
+#
+# Railway erkannte "No start command detected", weil kein Startbefehl
+# hinterlegt war. Der Default-Start unten startet den WEB-Dienst (API) auf
+# dem von Railway vorgegebenen Port ($PORT).
+#
+# Es laufen zwei Dienste aus DIESEM Repo:
+#   * Web-Dienst (API): nutzt den [start]-Befehl unten (Default).
+#   * Cron-Dienst (Sync): überschreibt den Start in den Service-Einstellungen
+#     mit  python -m aggregator.sync  und setzt einen Cron-Zeitplan.
+# Ein service-spezifischer "Custom Start Command" in Railway hat Vorrang vor
+# diesem Default — deshalb blockiert der Web-Default den Cron-Dienst nicht.
+
+providers = ["python"]
+
+[phases.install]
+# Abhängigkeiten aus requirements.txt installieren.
+cmds = [
+  "python -m pip install --upgrade pip",
+  "pip install -r requirements.txt",
+]
+
+[start]
+# Default-Start = Web-Dienst (API) auf Railways $PORT (NICHT fest 8000).
+cmd = "uvicorn aggregator.api:app --host 0.0.0.0 --port $PORT"

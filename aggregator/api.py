@@ -25,7 +25,7 @@ from sqlalchemy import distinct, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .db import SessionLocal
+from .db import SessionLocal, init_db
 from .models import Vehicle
 
 settings = get_settings()
@@ -34,6 +34,14 @@ app = FastAPI(
     version="1.0.0",
     description="Aggregierter Fahrzeugbestand der Partner-Autohäuser.",
 )
+
+
+@app.on_event("startup")
+def _ensure_schema() -> None:
+    """Tabellen anlegen, falls die DB frisch ist und der Web-Dienst vor dem
+    ersten Sync startet. create_all ist idempotent — ändert nichts, wenn die
+    Tabellen bereits existieren."""
+    init_db()
 
 
 def get_session() -> Session:

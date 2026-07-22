@@ -3,8 +3,24 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def normalize_database_url(url: str) -> str:
+    """SQLAlchemy-URL auf den psycopg-(v3)-Treiber normalisieren.
+
+    Managed-Postgres-Anbieter (u.a. Railway) liefern DATABASE_URL als
+    ``postgres://...`` oder ``postgresql://...``. SQLAlchemy würde daraus den
+    psycopg2-Dialekt ableiten — wir installieren aber psycopg v3. Deshalb das
+    Schema auf ``postgresql+psycopg://`` umschreiben, falls noch kein Treiber
+    explizit angegeben ist. Reine Verbindungs-Normalisierung, keine Logik.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
 
 
 class Settings(BaseSettings):
@@ -16,10 +32,18 @@ class Settings(BaseSettings):
 
     # --- Datenbank -------------------------------------------------------
     # SQLAlchemy-URL. Standard nutzt psycopg (v3) als Treiber.
+    # Vorrang: echte Umgebungsvariable > .env-Datei > dieser Default
+    # (pydantic-settings-Reihenfolge). Auf Railway zählt also DATABASE_URL
+    # aus der Umgebung, der localhost-Default greift nur lokal ohne Env.
     database_url: str = Field(
         default="postgresql+psycopg://aggregator:aggregator@localhost:5432/aggregator",
         description="SQLAlchemy-Verbindungs-URL zur Postgres-Datenbank.",
     )
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _normalize_db_url(cls, v: str) -> str:
+        return normalize_database_url(v)
     db_echo: bool = Field(default=False, description="SQL-Statements loggen (Debug).")
 
     # --- Sync ------------------------------------------------------------
