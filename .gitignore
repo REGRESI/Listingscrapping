@@ -1,0 +1,17 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Discovery / runtime artifacts
+discovery_capture.json
+*.log
+exports/
