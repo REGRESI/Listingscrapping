@@ -1,0 +1,19 @@
+# --- Kern ---
+httpx>=0.27,<0.29
+pydantic>=2.6,<3
+pydantic-settings>=2.2,<3
+SQLAlchemy>=2.0,<2.1
+psycopg[binary]>=3.1,<4        # Postgres-Treiber (postgresql+psycopg://)
+
+# --- API ---
+fastapi>=0.110,<0.120
+uvicorn[standard]>=0.29,<0.40
+
+# --- Scheduler ---
+APScheduler>=3.10,<4
+
+# --- Discovery (nur für tools/discover.py) ---
+playwright>=1.42,<2
+
+# --- Tests ---
+pytest>=8,<9
