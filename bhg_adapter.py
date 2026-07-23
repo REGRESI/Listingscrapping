@@ -32,6 +32,12 @@ HEADERS = {
     "Content-Type": "application/json",
     "X-Algolia-Application-Id": APP_ID,
     "X-Algolia-API-Key": SEARCH_KEY,
+    "Origin": "https://www.bhg-mobile.de",
+    "Referer": "https://www.bhg-mobile.de/",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    ),
 }
 
 BASE_FILTER = 'language:"de" AND (applications:"bhg")'
