@@ -80,9 +80,21 @@ class Settings(BaseSettings):
     # --- API -------------------------------------------------------------
     api_default_limit: int = Field(default=50, description="Standard-Seitengröße /vehicles.")
     api_max_limit: int = Field(default=500, description="Maximale Seitengröße /vehicles.")
+    # Erlaubte CORS-Ursprünge (kommagetrennt), damit die im Browser laufende
+    # Webseite (z.B. Lovable-Domain) die API direkt aufrufen darf. Leer = kein
+    # Ursprung erlaubt (Browser-Anfragen werden blockiert, Server-Anfragen nicht).
+    cors_origins: str = Field(
+        default="",
+        description="Kommagetrennte Liste erlaubter CORS-Ursprünge, z.B. https://app.example.com",
+    )
 
     # --- Logging ---------------------------------------------------------
     log_level: str = Field(default="INFO")
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """CORS_ORIGINS als bereinigte Liste (leere Einträge entfernt)."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 @lru_cache

@@ -211,6 +211,11 @@ Auf Railway laufen **drei Bausteine im selben Projekt**, alle mit derselben
 2. Optional: **„Settings"** → **„Deploy"** → **„Healthcheck Path"** = `/healthz`.
 3. Der Startbefehl ist über `nixpacks.toml` bereits gesetzt; ein eigener Eintrag
    unter **„Custom Start Command"** ist für den Web-Dienst nicht nötig.
+4. **CORS für die Webseite:** Web-Dienst → Tab **„Variables"** → **„New Variable"**
+   → Name **`CORS_ORIGINS`**, Wert = die Domain(s) eurer Webseite, kommagetrennt,
+   z.B. `https://deine-app.lovable.app,https://www.deine-domain.de`. Ohne diesen
+   Eintrag blockiert der Browser die direkten API-Aufrufe (nur die Methode GET
+   ist freigegeben).
 
 **E. Zweiten Dienst für den stündlichen Sync anlegen**
 1. Zurück auf den Projekt-Canvas → **„New"** → **„GitHub Repo"** → **dasselbe Repo**

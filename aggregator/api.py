@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import distinct, select
@@ -33,6 +34,16 @@ app = FastAPI(
     title="Regresi Fahrzeug-Aggregator API",
     version="1.0.0",
     description="Aggregierter Fahrzeugbestand der Partner-Autohäuser.",
+)
+
+# CORS: erlaubt der im Browser laufenden Webseite (z.B. Lovable-Domain) den
+# direkten Zugriff. Ursprünge kommen aus CORS_ORIGINS (kommagetrennt, per
+# Railway-Env konfigurierbar). Nur lesende Methode GET ist erlaubt.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_methods=["GET"],
+    allow_headers=["*"],
 )
 
 
