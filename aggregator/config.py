@@ -16,9 +16,14 @@ def normalize_database_url(url: str) -> str:
     Schema auf ``postgresql+psycopg://`` umschreiben, falls noch kein Treiber
     explizit angegeben ist. Reine Verbindungs-Normalisierung, keine Logik.
     """
-    if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://"):]
-    if url.startswith("postgresql://"):
+    if not url:
+        return url
+    url = url.strip()
+    # Schema case-insensitiv erkennen, Rest der URL unangetastet lassen.
+    lower = url.lower()
+    if lower.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://"):]
+    elif lower.startswith("postgresql://"):
         url = "postgresql+psycopg://" + url[len("postgresql://"):]
     return url
 
