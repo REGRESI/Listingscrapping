@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from aggregator.api import app
-from aggregator.adapters.bhg import BhgAdapter
+from aggregator.adapters.alphartis import BhgAdapter
 from aggregator import sync as sync_module
 from aggregator.sync import SyncEngine
 from tests.test_sync import FakeBhg, make_raw

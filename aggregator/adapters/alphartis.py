@@ -1,10 +1,14 @@
-"""Adapter für bhg / Alphartis.
+"""Adapter für die Alphartis-Plattform (bhg, ahg, ...).
 
-Dünner Wrapper um das gelieferte, unveränderte ``bhg_adapter.py`` im
-Projekt-Wurzelverzeichnis. Wir importieren dessen Funktionen und ergänzen
-nur das, was der Kern braucht: das SourceAdapter-Interface sowie
-Netzwerk-Retries mit exponentiellem Backoff (der Original-Adapter bleibt
-unangetastet).
+Dünner Wrapper um das gelieferte ``bhg_adapter.py`` im Projekt-Wurzel-
+verzeichnis. Wir importieren dessen (app-parametrisierte) Funktionen und
+ergänzen nur, was der Kern braucht: das SourceAdapter-Interface sowie
+Netzwerk-Retries mit exponentiellem Backoff. Die Normalisierungslogik bleibt
+komplett in ``bhg_adapter.py``.
+
+Mehrere Autohausgruppen liegen im selben Algolia-Index und unterscheiden sich
+nur durch das Anwendungskürzel (``app``). Jede Gruppe wird als eigener Adapter
+mit eigenem ``name`` (== Feld ``source``) registriert.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from .base import SourceAdapter
 
 log = get_logger(__name__)
 
-# --- das unveränderte Original-Modul aus dem Repo-Wurzelverzeichnis laden ---
+# --- das gelieferte Original-Modul aus dem Repo-Wurzelverzeichnis laden ---
 _ROOT = Path(__file__).resolve().parents[2]
 _BHG_PATH = _ROOT / "bhg_adapter.py"
 
@@ -44,24 +48,35 @@ _RETRYABLE = (
 )
 
 
-class BhgAdapter(SourceAdapter):
-    name = "bhg"
+class AlphartisAdapter(SourceAdapter):
+    """Generischer Adapter für eine Alphartis-Anwendung.
+
+    Unterklassen setzen ``name`` (== Kürzel == Feld ``source``). Der Kern
+    braucht nichts weiter zu wissen.
+    """
+
+    #: Anwendungskürzel (bhg, ahg, ...). Standard = name.
+    app: str = ""
 
     def __init__(self) -> None:
         self._settings = get_settings()
+        if not self.app:
+            self.app = self.name
 
     # -- discover -------------------------------------------------------
     def discover(self) -> dict[str, Any]:
         """Endpoint- und Bestands-Metadaten (Standort-Facette) ermitteln."""
         info: dict[str, Any] = {
+            "app": self.app,
             "endpoint": _bhg.ENDPOINT,
             "index": _bhg.INDEX,
-            "base_filter": _bhg.BASE_FILTER,
-            "location_facet": _bhg.LOCATION_FACET,
+            "base_filter": _bhg.base_filter(self.app),
+            "location_facet": _bhg.location_facet(self.app),
+            "domain": _bhg.app_domain(self.app),
         }
         try:
             with httpx.Client(timeout=30) as client:
-                locations = _bhg.list_locations(client)
+                locations = _bhg.list_locations(client, self.app)
             info["locations"] = locations
             info["total_reported"] = sum(locations.values()) if locations else 0
         except Exception as exc:  # pragma: no cover - nur Debug
@@ -70,12 +85,7 @@ class BhgAdapter(SourceAdapter):
 
     # -- fetch ----------------------------------------------------------
     def fetch(self) -> list[dict[str, Any]]:
-        """Alle bhg-Rohfahrzeuge holen, mit Retry/Backoff bei Netzfehlern.
-
-        ``fetch_all_raw`` akzeptiert einen httpx.Client — wir reichen einen
-        Client mit transport-level Retries hinein, ohne den Adapter selbst
-        zu ändern.
-        """
+        """Alle Rohfahrzeuge der Anwendung holen, mit Retry/Backoff bei Netzfehlern."""
         attempts = max(1, self._settings.fetch_max_retries)
         backoff = self._settings.fetch_retry_backoff
         last_exc: Exception | None = None
@@ -84,34 +94,43 @@ class BhgAdapter(SourceAdapter):
             try:
                 transport = httpx.HTTPTransport(retries=2)
                 with httpx.Client(transport=transport, timeout=30) as client:
-                    raw = _bhg.fetch_all_raw(client)
-                log.info("bhg fetch: %d Rohdatensätze geholt", len(raw))
+                    raw = _bhg.fetch_all_raw(client, self.app)
+                log.info("%s fetch: %d Rohdatensätze geholt", self.app, len(raw))
                 return raw
             except _RETRYABLE as exc:
                 last_exc = exc
                 if attempt < attempts:
                     wait = backoff ** attempt
                     log.warning(
-                        "bhg fetch Netzwerkfehler (Versuch %d/%d): %s — retry in %.0fs",
-                        attempt, attempts, exc, wait,
+                        "%s fetch Netzwerkfehler (Versuch %d/%d): %s — retry in %.0fs",
+                        self.app, attempt, attempts, exc, wait,
                     )
                     time.sleep(wait)
                 else:
-                    log.error("bhg fetch endgültig fehlgeschlagen: %s", exc)
+                    log.error("%s fetch endgültig fehlgeschlagen: %s", self.app, exc)
             except httpx.HTTPStatusError as exc:
-                # 4xx/5xx: bei 5xx retryen, bei 4xx sofort abbrechen.
                 last_exc = exc
                 status = exc.response.status_code if exc.response else 0
                 if 500 <= status < 600 and attempt < attempts:
                     wait = backoff ** attempt
-                    log.warning("bhg fetch HTTP %s — retry in %.0fs", status, wait)
+                    log.warning("%s fetch HTTP %s — retry in %.0fs", self.app, status, wait)
                     time.sleep(wait)
                 else:
-                    log.error("bhg fetch HTTP-Fehler %s — Abbruch", status)
+                    log.error("%s fetch HTTP-Fehler %s — Abbruch", self.app, status)
                     raise
         assert last_exc is not None
         raise last_exc
 
     # -- normalize ------------------------------------------------------
     def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
-        return _bhg.normalize(raw)
+        return _bhg.normalize(raw, self.app)
+
+
+class BhgAdapter(AlphartisAdapter):
+    name = "bhg"
+    app = "bhg"
+
+
+class AhgAdapter(AlphartisAdapter):
+    name = "ahg"
+    app = "ahg"

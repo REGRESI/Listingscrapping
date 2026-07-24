@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import select
 
-from aggregator.adapters.bhg import BhgAdapter
+from aggregator.adapters.alphartis import BhgAdapter
 from aggregator.models import Vehicle
 from aggregator.repository import count_active
 from aggregator import sync as sync_module

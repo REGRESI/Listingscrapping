@@ -5,8 +5,11 @@ einliest, in Postgres speichert und über einen **idempotenten, stündlichen
 Sync** laufend aktuell hält. Ausgabe für die Webseite über eine schlanke
 FastAPI (JSON + CSV).
 
-Erste Datenquelle: **bhg / Alphartis** (Algolia-Suchindex). Weitere Plattformen
+Datenquellen: **bhg** und **ahg** (beide auf der Alphartis-Plattform, gleicher
+Algolia-Index, Unterscheidung nur über das Anwendungskürzel). Jede Gruppe ist
+ein eigener Adapter mit eigenem `source`-Wert; weitere Gruppen/Plattformen
 kommen als zusätzliche Adapter dazu, ohne den Kern anzufassen (Adapter-Muster).
+Steuerbar über `SYNC_SOURCES` (leer = alle, sonst z.B. `bhg,ahg`).
 
 ---
 

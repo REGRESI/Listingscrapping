@@ -1,14 +1,14 @@
-"""Adapter-Registry. Neue Plattformen hier eintragen — sonst nichts am Kern."""
+"""Adapter-Registry. Neue Plattformen/Gruppen hier eintragen — sonst nichts am Kern."""
 from __future__ import annotations
 
+from .alphartis import AhgAdapter, BhgAdapter
 from .base import SourceAdapter
-from .bhg import BhgAdapter
 
 # Alle verfügbaren Adapter (Klassen).
 ADAPTER_CLASSES: tuple[type[SourceAdapter], ...] = (
     BhgAdapter,
-    # Weitere Autohaus-Plattformen hier ergänzen:
-    # OtherPlatformAdapter,
+    AhgAdapter,
+    # Weitere Autohausgruppen/Plattformen hier ergänzen.
 )
 
 
@@ -17,7 +17,7 @@ def all_adapters() -> list[SourceAdapter]:
 
 
 def get_adapters(names: list[str] | None = None) -> list[SourceAdapter]:
-    """Adapter-Instanzen; optional gefiltert nach Namen."""
+    """Adapter-Instanzen; optional gefiltert nach Namen (== SYNC_SOURCES)."""
     adapters = all_adapters()
     if not names:
         return adapters
