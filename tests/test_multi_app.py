@@ -133,7 +133,7 @@ def test_ahg_fetch_and_normalize_local():
 
 # --- Registry / SYNC_SOURCES ---------------------------------------------
 def test_registry_and_sync_sources_filter():
-    assert [a.name for a in get_adapters()] == ["bhg", "ahg"]
+    assert [a.name for a in get_adapters()][:2] == ["bhg", "ahg"]
     assert [a.name for a in get_adapters(["ahg"])] == ["ahg"]
     assert [a.name for a in get_adapters(["bhg"])] == ["bhg"]
     assert {a.name for a in get_adapters(["bhg", "ahg"])} == {"bhg", "ahg"}

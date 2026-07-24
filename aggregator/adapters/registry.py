@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from .alphartis import AhgAdapter, BhgAdapter
 from .base import SourceAdapter
+from .sug import SugAdapter
 
 # Alle verfügbaren Adapter (Klassen).
 ADAPTER_CLASSES: tuple[type[SourceAdapter], ...] = (
     BhgAdapter,
     AhgAdapter,
+    SugAdapter,
     # Weitere Autohausgruppen/Plattformen hier ergänzen.
 )
 
