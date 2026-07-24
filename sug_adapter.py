@@ -172,11 +172,63 @@ def fetch_all_raw(client: httpx.Client, limit: int = DEFAULT_LIMIT) -> list[dict
     return docs
 
 
-def _clean(value) -> str | None:
+# ---------------------------------------------------------------------------
+# Kraftstoff: die SuG-GraphQL-API liefert engine.fuel als Zahlencode (z.B. 3,
+# 10). Unser Schema erwartet einen lesbaren String. Diese Tabelle ordnet die
+# Codes den Bezeichnungen zu.
+#
+# WICHTIG: Die konkrete Code->Bezeichnung-Zuordnung ist VORLÄUFIG und sollte
+# einmal gegen echte SuG-Daten bestätigt werden (in dieser Umgebung ist der
+# Endpoint per Egress-Policy geblockt, daher nicht live prüfbar). Unbekannte
+# oder unsichere Codes gehen NICHT verloren: sie werden als String
+# durchgereicht (siehe _map_fuel), sodass der Datensatz erhalten bleibt.
+# Zum Korrigieren einfach hier die Zuordnung anpassen.
+FUEL_CODES: dict[int, str] = {
+    1: "Benzin",
+    2: "Diesel",
+    3: "Autogas (LPG)",
+    4: "Erdgas (CNG)",
+    5: "Elektro",
+    6: "Hybrid (Benzin/Elektro)",
+    7: "Hybrid (Diesel/Elektro)",
+    8: "Wasserstoff",
+    9: "Ethanol",
+    10: "Plug-in-Hybrid",
+}
+
+
+def _to_str(value) -> str | None:
+    """Beliebigen Skalar robust in einen String wandeln (Zahlen -> String),
+    damit Zahlwerte aus der API nicht an String-Feldern des Schemas scheitern."""
     if value is None:
         return None
-    s = str(value).strip()
-    return s or None
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    return str(value)
+
+
+# _clean ist ein Alias für _to_str (Rückwärtskompatibilität im Modul).
+_clean = _to_str
+
+
+def _map_fuel(value) -> str | None:
+    """Kraftstoff-Code -> Bezeichnung. Bereits lesbare Strings bleiben; ein
+    unbekannter Zahlencode wird als String durchgereicht (kein Datenverlust)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return FUEL_CODES.get(int(s), s)   # numerischer String -> Mapping/Fallback
+        return s                                # bereits lesbar (z.B. "Diesel")
+    if isinstance(value, (int, float)):
+        return FUEL_CODES.get(int(value), str(value))
+    return str(value)
 
 
 def _build_consumption(doc: dict) -> str | None:
@@ -252,8 +304,8 @@ def normalize(doc: dict) -> dict:
     return {
         "source": SOURCE,
         "source_id": str(doc.get("_id") or doc.get("uid")),
-        "make": doc.get("brand"),
-        "model": doc.get("name") or doc.get("model"),
+        "make": _to_str(doc.get("brand")),
+        "model": _to_str(doc.get("name") or doc.get("model")),
         "variant": None,
         "condition": None,
         "vehicle_class": None,
@@ -266,19 +318,21 @@ def normalize(doc: dict) -> dict:
         "leasing_rate": rate,
         "financing_rate": rate,
         "financing_down_payment": None,
-        "first_registration": doc.get("firstRegistration"),
+        "first_registration": _to_str(doc.get("firstRegistration")),
         "mileage_km": doc.get("mileage"),
         "power_kw": doc.get("power"),
-        "fuel": engine.get("fuel") if isinstance(engine, dict) else None,
-        "gearbox": engine.get("gearbox") if isinstance(engine, dict) else None,
-        "color": doc.get("color"),
+        # fuel kommt als Zahlencode -> über Mapping in lesbare Bezeichnung;
+        # gearbox robust in String (falls die API auch hier einen Code liefert).
+        "fuel": _map_fuel(engine.get("fuel")) if isinstance(engine, dict) else None,
+        "gearbox": _to_str(engine.get("gearbox")) if isinstance(engine, dict) else None,
+        "color": _to_str(doc.get("color")),
         "features": [],
         # emission + fuelConsumption + wltp zu einem Anzeige-Text zusammengefasst.
         "consumption": _build_consumption(doc),
         # Standort: name bzw. city; volle Adresse/Telefon bleiben in raw erhalten.
-        "location": (location.get("name") or location.get("city")) if isinstance(location, dict) else None,
+        "location": _to_str(location.get("name") or location.get("city")) if isinstance(location, dict) else None,
         "reserved": False,
-        "url": doc.get("link"),
+        "url": _to_str(doc.get("link")),
         "images": image_urls,
         "raw": doc,   # enthält u.a. location.street/zipCode/city/phone für spätere Anzeige
     }

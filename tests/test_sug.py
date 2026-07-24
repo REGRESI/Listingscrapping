@@ -13,6 +13,7 @@ import sug_adapter as sug
 from aggregator.adapters.registry import get_adapters
 from aggregator.adapters.sug import SugAdapter
 from aggregator.models import Vehicle
+from aggregator.schema import NormalizedVehicle
 from aggregator import sync as sync_module
 from aggregator.sync import SyncEngine
 
@@ -149,6 +150,40 @@ def test_consumption_summary():
     assert "CO2 kombiniert: 119" in c
 
 
+def test_fuel_numeric_code_is_mapped():
+    # engine.fuel als Zahlencode -> lesbare Bezeichnung (Mapping-Tabelle).
+    doc = make_sug_doc("f1")
+    doc["engine"]["fuel"] = 2
+    v = sug.normalize(doc)
+    assert v["fuel"] == "Diesel"
+    # als numerischer String ebenso.
+    doc["engine"]["fuel"] = "5"
+    assert sug.normalize(doc)["fuel"] == "Elektro"
+
+
+def test_fuel_unknown_code_falls_back_to_string_no_data_loss():
+    doc = make_sug_doc("f2")
+    doc["engine"]["fuel"] = 9999      # unbekannter Code
+    v = sug.normalize(doc)
+    assert v["fuel"] == "9999"        # als String durchgereicht, nicht verworfen
+    # und validiert sauber gegen unser Schema (kein Typfehler)
+    model = NormalizedVehicle.model_validate(v)
+    assert model.fuel == "9999"
+
+
+def test_int_fields_do_not_break_validation():
+    # Zahlwerte in String-Feldern (fuel/gearbox) dürfen den Datensatz nicht kippen.
+    doc = make_sug_doc("f3")
+    doc["engine"]["fuel"] = 3
+    doc["engine"]["gearbox"] = 10     # hypothetischer Zahlencode
+    v = sug.normalize(doc)
+    model = NormalizedVehicle.model_validate(v)   # darf NICHT werfen
+    assert model.source == "sug"
+    assert isinstance(model.fuel, str)
+    assert isinstance(model.gearbox, str)
+    assert model.gearbox == "10"
+
+
 def test_registry_includes_sug_and_filter():
     assert "sug" in [a.name for a in get_adapters()]
     assert [a.name for a in get_adapters(["sug"])] == ["sug"]
@@ -173,3 +208,28 @@ def test_sync_sug_inserts_with_source(db_session, monkeypatch):
     rows = db_session.execute(select(Vehicle).where(Vehicle.source == "sug")).scalars().all()
     assert {r.source_id for r in rows} == {"s1", "s2"}
     assert all(r.consumption and "Verbrauch" in r.consumption for r in rows)
+
+
+def test_sync_sug_with_numeric_fuel_no_errors(db_session, monkeypatch):
+    # Regression: engine.fuel als Zahlencode kippte zuvor die Validierung.
+    docs = []
+    for i, code in enumerate([1, 2, 3, 5, 10, 9999]):
+        d = make_sug_doc(f"n{i}")
+        d["engine"]["fuel"] = code
+        docs.append(d)
+    monkeypatch.setattr(sync_module, "get_adapters", lambda names=None: [FakeSug(docs)])
+
+    report = SyncEngine().run(sources=["sug"])
+    res = report.results[0]
+    assert res.fetched == len(docs)
+    assert res.errors == 0            # keine fuel-Validierungsfehler mehr
+    assert res.inserted == len(docs)  # alle Fahrzeuge übernommen
+
+    fuels = {
+        r.source_id: r.fuel
+        for r in db_session.execute(select(Vehicle).where(Vehicle.source == "sug")).scalars()
+    }
+    assert fuels["n0"] == "Benzin"
+    assert fuels["n1"] == "Diesel"
+    assert fuels["n3"] == "Elektro"
+    assert fuels["n5"] == "9999"      # unbekannt -> String-Fallback, nicht verworfen
