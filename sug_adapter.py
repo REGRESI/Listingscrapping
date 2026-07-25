@@ -1,12 +1,20 @@
 """
 Regresi Fahrzeug-Aggregator — Adapter: SuG (sug.de)
 ====================================================
-Quelle: GraphQL-API (operationName "Cars"). Holt den kompletten SuG-Bestand
-und übersetzt ihn in das einheitliche Schema (gleiches Format wie bhg/ahg).
+Quelle: GraphQL-API. ZWEISTUFIGER Abruf, weil die Listenabfrage "Cars" nur
+unvollständige Daten liefert (kryptischer Titel, keine Bilder/Ausstattung):
 
-Paginierung über page/limit; das Ende wird an ``totalPages`` aus der Antwort
-erkannt. Query, Variablenstruktur und Feldliste entsprechen exakt dem
-nachweislich funktionierenden Browser-Request.
+  Stufe 1  "Cars"  -> paginiert alle _id einsammeln (Ende an totalPages).
+  Stufe 2  "Car"   -> pro _id die vollständigen Detaildaten holen.
+
+Rate-Limiting: begrenzte Parallelität + kleine Pause je Detailabfrage, damit
+SuG bei ~2000 Detailabfragen pro Lauf nicht blockt. Ein Fehler eines einzelnen
+Fahrzeugs überspringt nur diesen Datensatz, nicht den ganzen Lauf.
+
+HINWEIS: Die "Car"-Detail-Query (Root-Feldname, Variablentyp für _id, exakte
+Feldnamen) ist gegen das Live-Schema zu bestätigen; hier ist der Endpoint per
+Egress-Policy geblockt. Uneindeutige Stellen sind als Konstanten markiert und
+leicht anpassbar.
 
 Setup:
     pip install httpx
@@ -17,14 +25,24 @@ Start:
 from __future__ import annotations
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import httpx
 
 ENDPOINT = "https://api.sug-gebrauchtwagen.de/"
 DOMAIN = "https://www.sug.de"
 SOURCE = "sug"
 
-# Seitengröße wie im Beispiel-Request (bewährt). Über page paginiert.
-DEFAULT_LIMIT = 20
+# Stufe 1: Seitengröße der Listenabfrage. Über page paginiert.
+DEFAULT_LIMIT = 50
+
+# Stufe 2: Rate-Limiting der Detailabfragen.
+DETAIL_CONCURRENCY = 5       # max. gleichzeitige Detailabfragen
+DETAIL_DELAY = 0.15          # kleine Pause (s) je Detailabfrage
+
+# GraphQL-Typ der _id-Variable in der "Car"-Abfrage. Falls das Live-Schema
+# einen anderen Typ nutzt (z.B. "ID!"), hier anpassen.
+CAR_ID_GQL_TYPE = "String!"
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -37,152 +55,190 @@ HEADERS = {
     ),
 }
 
-# GraphQL-Query exakt aus dem funktionierenden Browser-Request.
-QUERY = """query Cars($pagination: PaginationInput, $filter: CarFilterInput!) {
+# --- Stufe 1: Liste, nur _id + Paginierungs-Metadaten -----------------------
+CARS_LIST_QUERY = """query Cars($pagination: PaginationInput, $filter: CarFilterInput!) {
   cars(pagination: $pagination, filter: $filter) {
     docs {
       _id
-      uid
-      link
-      brand
-      name
-      price
-      priceWithoutTax
-      mileage
-      power
-      firstRegistration
-      firstRegistrationDate
-      location {
-        name
-        street
-        zipCode
-        city
-        phone
-        clickAndMeetOrClickAndCollect
-        clickAndMeetUrl
-        __typename
-      }
-      emission
-      fuelConsumption
-      combinedPowerConsumption
-      images {
-        imagepath
-        __typename
-      }
-      model
-      categories
-      color
-      engine {
-        fuel
-        gearbox
-        __typename
-      }
-      financing {
-        rate
-        regulatory
-        __typename
-      }
-      energyEfficiencyClass
-      vatReportable
-      warranty
-      qualitySeal {
-        youngStar
-        __typename
-      }
-      wltp {
-        combined
-        co {
-          klasse
-          klasse_gewichtet_kombiniert
-          klasse_entladene_batterie
-          emission
-          emission_gewichtet_kombiniert
-          __typename
-        }
-        stromverbrauch {
-          kombiniert {
-            elektro
-            hybrid
-            __typename
-          }
-          __typename
-        }
-        kraftstoffverbrauch {
-          kombiniert {
-            hybrid_entladene_batterie
-            hybrid_geladene_batterie
-            __typename
-          }
-          __typename
-        }
-        __typename
-      }
-      vendor
       __typename
     }
     totalDocs
     totalPages
-    linkList {
-      _id
-      link
-      __typename
-    }
     __typename
   }
 }"""
 
+# --- Stufe 2: Detail pro Fahrzeug ------------------------------------------
+# Vollständige Felder inkl. equipmentTranslations und imagebigthumbpath.
+CAR_QUERY = """query Car($_id: %s) {
+  car(_id: $_id) {
+    _id
+    uid
+    link
+    brand
+    model
+    name
+    price
+    priceWithoutTax
+    mileage
+    power
+    firstRegistration
+    firstRegistrationDate
+    color
+    categories
+    equipmentTranslations
+    location {
+      name
+      street
+      zipCode
+      city
+      phone
+      __typename
+    }
+    engine {
+      fuel
+      gearbox
+      __typename
+    }
+    financing {
+      rate
+      regulatory
+      __typename
+    }
+    images {
+      imagepath
+      imagebigthumbpath
+      __typename
+    }
+    emission
+    fuelConsumption
+    combinedPowerConsumption
+    energyEfficiencyClass
+    wltp {
+      combined
+      co {
+        emission
+        emission_gewichtet_kombiniert
+        klasse
+        klasse_gewichtet_kombiniert
+        __typename
+      }
+      stromverbrauch {
+        kombiniert {
+          elektro
+          hybrid
+          __typename
+        }
+        __typename
+      }
+      kraftstoffverbrauch {
+        kombiniert {
+          hybrid_entladene_batterie
+          hybrid_geladene_batterie
+          __typename
+        }
+        __typename
+      }
+      __typename
+    }
+    vendor
+    __typename
+  }
+}""" % CAR_ID_GQL_TYPE
 
-def _query(client: httpx.Client, page: int = 1, limit: int = DEFAULT_LIMIT) -> dict:
-    """Eine GraphQL-Seite holen. Gibt das `cars`-Objekt (docs/totalDocs/…) zurück."""
+
+def _post(client: httpx.Client, body: dict) -> dict:
+    r = client.post(ENDPOINT, headers=HEADERS, content=json.dumps(body), timeout=30)
+    r.raise_for_status()
+    payload = r.json()
+    if payload.get("errors"):
+        raise RuntimeError(f"GraphQL-Fehler: {payload['errors']}")
+    return payload["data"]
+
+
+def _query_cars(client: httpx.Client, page: int = 1, limit: int = DEFAULT_LIMIT) -> dict:
+    """Eine Listen-Seite (Stufe 1). Gibt das `cars`-Objekt zurück."""
     body = {
         "operationName": "Cars",
         "variables": {
             "filter": {"utilityVehicle": False, "vehicleInventory": {}},
             "pagination": {"page": page, "limit": limit, "sort": "price"},
         },
-        "query": QUERY,
+        "query": CARS_LIST_QUERY,
     }
-    r = client.post(ENDPOINT, headers=HEADERS, content=json.dumps(body), timeout=30)
-    r.raise_for_status()
-    payload = r.json()
-    if payload.get("errors"):
-        raise RuntimeError(f"GraphQL-Fehler: {payload['errors']}")
-    return payload["data"]["cars"]
+    return _post(client, body)["cars"]
 
 
 def total_docs(client: httpx.Client) -> int:
-    """Gesamtzahl der Fahrzeuge (eine kleine Abfrage)."""
-    cars = _query(client, page=1, limit=1)
-    return cars.get("totalDocs", 0)
+    """Gesamtzahl der Fahrzeuge (kleine Abfrage)."""
+    return _query_cars(client, page=1, limit=1).get("totalDocs", 0)
 
 
-def fetch_all_raw(client: httpx.Client, limit: int = DEFAULT_LIMIT) -> list[dict]:
-    """Alle SuG-Fahrzeuge holen, über page/limit bis totalPages paginiert."""
-    docs: list[dict] = []
+def fetch_all_ids(client: httpx.Client, limit: int = DEFAULT_LIMIT) -> list[str]:
+    """Stufe 1: alle _id über page/limit bis totalPages einsammeln."""
+    ids: list[str] = []
     page = 1
     while True:
-        cars = _query(client, page=page, limit=limit)
+        cars = _query_cars(client, page=page, limit=limit)
         batch = cars.get("docs") or []
-        docs.extend(batch)
+        for d in batch:
+            _id = d.get("_id")
+            if _id:
+                ids.append(str(_id))
         total_pages = cars.get("totalPages") or 0
         if not batch or page >= total_pages:
             break
         page += 1
         time.sleep(0.2)   # höflich bleiben
+    return ids
+
+
+def fetch_car(client: httpx.Client, _id: str) -> dict | None:
+    """Stufe 2: Detaildaten eines Fahrzeugs holen."""
+    body = {
+        "operationName": "Car",
+        "variables": {"_id": _id},
+        "query": CAR_QUERY,
+    }
+    return _post(client, body).get("car")
+
+
+def fetch_all_raw(
+    client: httpx.Client,
+    limit: int = DEFAULT_LIMIT,
+    concurrency: int = DETAIL_CONCURRENCY,
+    delay: float = DETAIL_DELAY,
+) -> list[dict]:
+    """Zweistufiger Abruf: alle _id sammeln, dann Details parallel (begrenzt)
+    holen. Fehler einzelner Fahrzeuge werden übersprungen, nicht der Lauf."""
+    ids = fetch_all_ids(client, limit)
+
+    def _one(_id: str) -> dict | None:
+        time.sleep(delay)   # kleine Pause je Detailabfrage (Rate-Limiting)
+        try:
+            car = fetch_car(client, _id)
+            if car:
+                return car
+            return None
+        except Exception as exc:   # einzelnes Fahrzeug überspringen
+            print(f"[sug] Detailabruf übersprungen (_id={_id}): {exc!r}")
+            return None
+
+    docs: list[dict] = []
+    workers = max(1, concurrency)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_one, _id) for _id in ids]
+        for fut in as_completed(futures):
+            car = fut.result()
+            if car:
+                docs.append(car)
     return docs
 
 
 # ---------------------------------------------------------------------------
-# Kraftstoff: die SuG-GraphQL-API liefert engine.fuel als Zahlencode (z.B. 3,
-# 10). Unser Schema erwartet einen lesbaren String. Diese Tabelle ordnet die
-# Codes den Bezeichnungen zu.
-#
-# WICHTIG: Die konkrete Code->Bezeichnung-Zuordnung ist VORLÄUFIG und sollte
-# einmal gegen echte SuG-Daten bestätigt werden (in dieser Umgebung ist der
-# Endpoint per Egress-Policy geblockt, daher nicht live prüfbar). Unbekannte
-# oder unsichere Codes gehen NICHT verloren: sie werden als String
-# durchgereicht (siehe _map_fuel), sodass der Datensatz erhalten bleibt.
-# Zum Korrigieren einfach hier die Zuordnung anpassen.
+# Kraftstoff: engine.fuel kommt als Zahlencode (z.B. 3, 10). Unser Schema
+# erwartet einen lesbaren String. VORLÄUFIGE Zuordnung — gegen echte SuG-Daten
+# bestätigen; unbekannte Codes gehen als String durch (kein Datenverlust).
 FUEL_CODES: dict[int, str] = {
     1: "Benzin",
     2: "Diesel",
@@ -208,13 +264,12 @@ def _to_str(value) -> str | None:
     return str(value)
 
 
-# _clean ist ein Alias für _to_str (Rückwärtskompatibilität im Modul).
-_clean = _to_str
+_clean = _to_str   # Alias
 
 
 def _map_fuel(value) -> str | None:
-    """Kraftstoff-Code -> Bezeichnung. Bereits lesbare Strings bleiben; ein
-    unbekannter Zahlencode wird als String durchgereicht (kein Datenverlust)."""
+    """Kraftstoff-Code -> Bezeichnung. Lesbare Strings bleiben; unbekannter
+    Zahlencode wird als String durchgereicht (kein Datenverlust)."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -224,30 +279,27 @@ def _map_fuel(value) -> str | None:
         if not s:
             return None
         if s.isdigit():
-            return FUEL_CODES.get(int(s), s)   # numerischer String -> Mapping/Fallback
-        return s                                # bereits lesbar (z.B. "Diesel")
+            return FUEL_CODES.get(int(s), s)
+        return s
     if isinstance(value, (int, float)):
         return FUEL_CODES.get(int(value), str(value))
     return str(value)
 
 
 def _build_consumption(doc: dict) -> str | None:
-    """emission, fuelConsumption und die wltp-Daten sinnvoll zu einem
-    Anzeige-Text für Verbrauch/CO2 zusammenfassen (Pflichtangaben)."""
+    """emission, fuelConsumption und die wltp-Daten zu einem Anzeige-Text
+    für Verbrauch/CO2 zusammenfassen (Pflichtangaben)."""
     parts: list[str] = []
 
     fc = _clean(doc.get("fuelConsumption"))
     if fc:
         parts.append(f"Verbrauch: {fc}")
-
     cpc = _clean(doc.get("combinedPowerConsumption"))
     if cpc:
         parts.append(f"Stromverbrauch: {cpc}")
-
     em = _clean(doc.get("emission"))
     if em:
         parts.append(f"Emission: {em}")
-
     eec = _clean(doc.get("energyEfficiencyClass"))
     if eec:
         parts.append(f"Effizienzklasse: {eec}")
@@ -275,8 +327,8 @@ def _build_consumption(doc: dict) -> str | None:
                 parts.append(f"Stromverbrauch WLTP (Hybrid): {hybrid}")
         kraft = (((wltp.get("kraftstoffverbrauch") or {}).get("kombiniert")) or {})
         if isinstance(kraft, dict):
-            entladen = _clean(kraft.get("hybrid_entladene_batterie"))
             geladen = _clean(kraft.get("hybrid_geladene_batterie"))
+            entladen = _clean(kraft.get("hybrid_entladene_batterie"))
             if geladen:
                 parts.append(f"Kraftstoff WLTP (geladen): {geladen}")
             if entladen:
@@ -285,15 +337,51 @@ def _build_consumption(doc: dict) -> str | None:
     return " · ".join(parts) if parts else None
 
 
+def _extract_images(doc: dict) -> list[str]:
+    """Bild-URLs aus images übernehmen (imagepath bzw. imagebigthumbpath).
+    Es sind bereits vollständige digiaccess-URLs -> unverändert übernehmen."""
+    out: list[str] = []
+    for img in doc.get("images") or []:
+        if isinstance(img, dict):
+            url = img.get("imagepath") or img.get("imagebigthumbpath")
+            if url:
+                out.append(str(url))
+        elif isinstance(img, str) and img.strip():
+            out.append(img.strip())
+    return out
+
+
+def _extract_features(doc: dict) -> list[str]:
+    """equipmentTranslations in unser features-Feld übernehmen."""
+    equip = doc.get("equipmentTranslations")
+    out: list[str] = []
+    if isinstance(equip, list):
+        for e in equip:
+            if isinstance(e, str) and e.strip():
+                out.append(e.strip())
+            elif isinstance(e, dict):
+                val = e.get("value") or e.get("name") or e.get("label") or e.get("translation")
+                if val:
+                    out.append(str(val).strip())
+    elif isinstance(equip, str) and equip.strip():
+        out.append(equip.strip())
+    return out
+
+
+def _build_title_model(doc: dict) -> str | None:
+    """Titel-Basis = brand + model (NICHT das kryptische name-Feld). Wir liefern
+    hier den model-Anteil; make (brand) steht separat im Schema, die Webseite
+    setzt den Titel aus make + model zusammen."""
+    return _to_str(doc.get("model"))
+
+
 def normalize(doc: dict) -> dict:
-    """SuG-Rohdatensatz -> einheitliches Schema."""
+    """SuG-Detaildatensatz (Stufe 2) -> einheitliches Schema."""
     engine = doc.get("engine") or {}
     financing = doc.get("financing") or {}
     location = doc.get("location") or {}
-    images = doc.get("images") or []
     categories = doc.get("categories") or []
 
-    image_urls = [img.get("imagepath") for img in images if isinstance(img, dict) and img.get("imagepath")]
     rate = financing.get("rate") if isinstance(financing, dict) else None
     category = None
     if isinstance(categories, list) and categories:
@@ -304,8 +392,9 @@ def normalize(doc: dict) -> dict:
     return {
         "source": SOURCE,
         "source_id": str(doc.get("_id") or doc.get("uid")),
+        # Titel: brand + model. name bleibt nur in raw (kryptische Händler-Überschrift).
         "make": _to_str(doc.get("brand")),
-        "model": _to_str(doc.get("name") or doc.get("model")),
+        "model": _build_title_model(doc),
         "variant": None,
         "condition": None,
         "vehicle_class": None,
@@ -321,20 +410,20 @@ def normalize(doc: dict) -> dict:
         "first_registration": _to_str(doc.get("firstRegistration")),
         "mileage_km": doc.get("mileage"),
         "power_kw": doc.get("power"),
-        # fuel kommt als Zahlencode -> über Mapping in lesbare Bezeichnung;
-        # gearbox robust in String (falls die API auch hier einen Code liefert).
+        # fuel: Zahlencode -> Bezeichnung; gearbox robust in String.
         "fuel": _map_fuel(engine.get("fuel")) if isinstance(engine, dict) else None,
         "gearbox": _to_str(engine.get("gearbox")) if isinstance(engine, dict) else None,
         "color": _to_str(doc.get("color")),
-        "features": [],
-        # emission + fuelConsumption + wltp zu einem Anzeige-Text zusammengefasst.
+        # Ausstattung aus equipmentTranslations.
+        "features": _extract_features(doc),
         "consumption": _build_consumption(doc),
         # Standort: name bzw. city; volle Adresse/Telefon bleiben in raw erhalten.
         "location": _to_str(location.get("name") or location.get("city")) if isinstance(location, dict) else None,
         "reserved": False,
         "url": _to_str(doc.get("link")),
-        "images": image_urls,
-        "raw": doc,   # enthält u.a. location.street/zipCode/city/phone für spätere Anzeige
+        # Bilder aus dem Detail (imagepath/imagebigthumbpath), vollständige URLs.
+        "images": _extract_images(doc),
+        "raw": doc,   # vollständige Detaildaten (inkl. name, Adresse/Telefon)
     }
 
 

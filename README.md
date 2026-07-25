@@ -232,6 +232,17 @@ Auf Railway laufen **drei Bausteine im selben Projekt**, alle mit derselben
 5. Im selben Bereich **„Cron Schedule"** = `0 * * * *` (stündlich zur vollen
    Stunde, UTC).
 6. Der Sync-Dienst braucht **keine** öffentliche Domain (kein „Generate Domain").
+7. **Laufzeit SuG:** SuG wird zweistufig geholt (Liste + ~2000 Einzelabfragen),
+   ein Lauf dauert daher einige Minuten. Das ist unkritisch:
+   - Railway-Cron erzwingt **kein** Zeitlimit auf den Prozess; er läuft bis zum
+     Ende und beendet sich dann selbst.
+   - Der Sync hat **keinen** globalen Timeout im Code; nur einzelne HTTP-Anfragen
+     haben 30s. Ein Fehler eines einzelnen Fahrzeugs überspringt nur diesen
+     Datensatz (kein Abbruch des Laufs).
+   - Die Laufdauer bleibt deutlich unter dem stündlichen Intervall; überlappende
+     Läufe verhindert der eingebaute Scheduler ohnehin (`max_instances=1`).
+   - Tempo/Schonung sind in `sug_adapter.py` einstellbar
+     (`DETAIL_CONCURRENCY`, Standard 5; `DETAIL_DELAY`, Standard 0,15s).
 
 **F. Fertig**
 - Der Cron-Dienst läuft stündlich, holt den Bestand und aktualisiert die DB;

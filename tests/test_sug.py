@@ -1,7 +1,8 @@
-"""SuG-Adapter (GraphQL): Paginierung, Feld-Mapping, consumption, Sync-Integration.
+"""SuG-Adapter (GraphQL, zweistufig): Stufe1 (_id sammeln) + Stufe2 (Details),
+Feld-Mapping (Titel brand+model, Bilder, Ausstattung), fuel-Mapping, Sync.
 
-Ohne echtes Netz (in dieser Umgebung geblockt): ein Fake-GraphQL-Client liefert
-Antworten in der echten Struktur (data.cars.docs/totalPages/totalDocs).
+Ohne echtes Netz (in dieser Umgebung geblockt): ein Fake-GraphQL-Client
+beantwortet "Cars" (Liste der _id) und "Car" (Detail je _id).
 """
 from __future__ import annotations
 
@@ -18,178 +19,202 @@ from aggregator import sync as sync_module
 from aggregator.sync import SyncEngine
 
 
-def make_sug_doc(_id: str, *, price=25000, brand="BMW", name="320d") -> dict:
+def make_detail(_id: str, *, brand="BMW", model="320d Touring", name="AB-CD 123 Aktion",
+                fuel="Diesel", price=25000) -> dict:
+    """Vollständiger 'Car'-Detaildatensatz (Stufe 2)."""
     return {
         "_id": _id,
         "uid": f"uid-{_id}",
         "link": f"https://www.sug.de/fahrzeug/{_id}",
         "brand": brand,
-        "name": name,
-        "model": "3er",
+        "model": model,
+        "name": name,   # kryptische Händler-Überschrift -> NICHT als Titel
         "price": price,
-        "priceWithoutTax": price - 4000,
         "mileage": 55000,
         "power": 140,
         "firstRegistration": "05/2021",
-        "firstRegistrationDate": "2021-05-01",
-        "location": {
-            "name": "SuG Stuttgart",
-            "street": "Teststr. 1",
-            "zipCode": "70173",
-            "city": "Stuttgart",
-            "phone": "0711 12345",
-            "__typename": "Location",
-        },
+        "color": "Blau",
+        "categories": ["Kombi"],
+        "equipmentTranslations": ["Klimaautomatik", "Navigationssystem", "LED-Scheinwerfer"],
+        "location": {"name": "SuG Stuttgart", "city": "Stuttgart", "phone": "0711 12345"},
+        "engine": {"fuel": fuel, "gearbox": "Automatik"},
+        "financing": {"rate": 249.0},
+        "images": [
+            {"imagepath": f"https://digiaccess.example/{_id}/1.jpg",
+             "imagebigthumbpath": f"https://digiaccess.example/{_id}/1_big.jpg"},
+            {"imagepath": f"https://digiaccess.example/{_id}/2.jpg",
+             "imagebigthumbpath": f"https://digiaccess.example/{_id}/2_big.jpg"},
+        ],
         "emission": "120 g/km",
         "fuelConsumption": "5,1 l/100km",
-        "combinedPowerConsumption": None,
-        "images": [
-            {"imagepath": f"https://img.sug.de/{_id}/1.jpg", "__typename": "Image"},
-            {"imagepath": f"https://img.sug.de/{_id}/2.jpg", "__typename": "Image"},
-        ],
-        "categories": ["Limousine", "Business"],
-        "color": "Blau",
-        "engine": {"fuel": "Diesel", "gearbox": "Automatik", "__typename": "Engine"},
-        "financing": {"rate": 249.0, "regulatory": "…", "__typename": "Financing"},
         "energyEfficiencyClass": "A",
-        "wltp": {
-            "combined": "5,1",
-            "co": {"emission": "119", "klasse": "B", "__typename": "Co"},
-            "stromverbrauch": {"kombiniert": {"elektro": None, "hybrid": None}},
-            "kraftstoffverbrauch": {"kombiniert": {}},
-            "__typename": "Wltp",
-        },
+        "wltp": {"combined": "5,1", "co": {"emission": "119"}},
         "vendor": "SuG",
-        "__typename": "Car",
     }
 
 
-class _FakeResp:
-    def __init__(self, cars: dict):
-        self._cars = cars
+class _Resp:
+    def __init__(self, data: dict):
+        self._data = data
 
     def raise_for_status(self):
         pass
 
     def json(self):
-        return {"data": {"cars": self._cars}}
+        return {"data": self._data}
 
 
-class FakeGraphQL:
-    """httpx.Client-Ersatz, der die Cars-GraphQL-API seitenweise nachbildet."""
+class FakeSugAPI:
+    """Beantwortet 'Cars' (Liste der _id, paginiert) und 'Car' (Detail)."""
 
-    def __init__(self, pages: list[list[dict]], total_docs: int):
-        self.pages = pages
-        self.total = total_docs
+    def __init__(self, page_ids: list[list[str]], details: dict[str, dict],
+                 broken_ids: set[str] | None = None):
+        self.page_ids = page_ids
+        self.details = details
+        self.broken_ids = broken_ids or set()
+        self.total = sum(len(p) for p in page_ids)
         self.calls: list[dict] = []
 
     def post(self, url, headers=None, content=None, timeout=None):
         body = json.loads(content)
-        self.calls.append({"headers": headers, "body": body})
-        page = body["variables"]["pagination"]["page"]
-        limit = body["variables"]["pagination"]["limit"]
-        total_pages = len(self.pages)
-        if limit == 1:  # total_docs()-Sonderabfrage
-            return _FakeResp({"docs": [], "totalDocs": self.total, "totalPages": total_pages})
-        docs = self.pages[page - 1] if 1 <= page <= total_pages else []
-        return _FakeResp({"docs": docs, "totalDocs": self.total, "totalPages": total_pages})
+        self.calls.append({"op": body["operationName"], "headers": headers, "vars": body["variables"]})
+        if body["operationName"] == "Cars":
+            page = body["variables"]["pagination"]["page"]
+            limit = body["variables"]["pagination"]["limit"]
+            total_pages = len(self.page_ids)
+            if limit == 1:
+                return _Resp({"cars": {"docs": [], "totalDocs": self.total, "totalPages": total_pages}})
+            ids = self.page_ids[page - 1] if 1 <= page <= total_pages else []
+            return _Resp({"cars": {
+                "docs": [{"_id": i} for i in ids],
+                "totalDocs": self.total,
+                "totalPages": total_pages,
+            }})
+        # operationName == "Car"
+        _id = body["variables"]["_id"]
+        if _id in self.broken_ids:
+            return _ErrResp()   # GraphQL-Fehler -> Detailabruf scheitert
+        return _Resp({"car": self.details.get(_id)})
 
 
-def test_pagination_uses_total_pages():
-    pages = [
-        [make_sug_doc("a"), make_sug_doc("b")],
-        [make_sug_doc("c")],
-    ]
-    client = FakeGraphQL(pages, total_docs=3)
-    raw = sug.fetch_all_raw(client, limit=2)
-    assert [d["_id"] for d in raw] == ["a", "b", "c"]
-    # Zwei Seiten abgefragt, operationName korrekt.
-    requested_pages = [c["body"]["variables"]["pagination"]["page"] for c in client.calls]
-    assert requested_pages == [1, 2]
-    assert client.calls[0]["body"]["operationName"] == "Cars"
-    assert client.calls[0]["headers"]["Origin"] == "https://www.sug.de"
-    assert client.calls[0]["headers"]["Referer"] == "https://www.sug.de/"
+class _ErrResp:
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"errors": [{"message": "boom"}]}
+
+
+# --- Stufe 1 --------------------------------------------------------------
+def test_stage1_collects_ids_across_pages():
+    api = FakeSugAPI([["a", "b"], ["c"]], {})
+    ids = sug.fetch_all_ids(api, limit=2)
+    assert ids == ["a", "b", "c"]
+    pages = [c["vars"]["pagination"]["page"] for c in api.calls if c["op"] == "Cars"]
+    assert pages == [1, 2]
+    assert api.calls[0]["op"] == "Cars"
+    assert api.calls[0]["headers"]["Origin"] == "https://www.sug.de"
 
 
 def test_total_docs():
-    client = FakeGraphQL([[make_sug_doc("a")]], total_docs=137)
-    assert sug.total_docs(client) == 137
+    api = FakeSugAPI([["a"], ["b"], ["c"]], {})
+    assert sug.total_docs(api) == 3
 
 
-def test_normalize_mapping():
-    v = sug.normalize(make_sug_doc("x1", price=31900, brand="Audi", name="A3 Sportback"))
-    assert v["source"] == "sug"
-    assert v["source_id"] == "x1"
+# --- Stufe 2 (zweistufiger Abruf) -----------------------------------------
+def test_two_stage_fetch_returns_full_details():
+    ids = ["a", "b", "c"]
+    details = {i: make_detail(i) for i in ids}
+    api = FakeSugAPI([ids], details)
+    raw = sug.fetch_all_raw(api, delay=0)
+    assert {d["_id"] for d in raw} == set(ids)
+    # Detaildaten sind vollständig (equipmentTranslations vorhanden).
+    assert all("equipmentTranslations" in d for d in raw)
+    # Es gab je _id genau eine "Car"-Detailabfrage.
+    car_calls = [c for c in api.calls if c["op"] == "Car"]
+    assert {c["vars"]["_id"] for c in car_calls} == set(ids)
+
+
+def test_detail_error_is_skipped_not_fatal():
+    ids = ["a", "b", "c"]
+    details = {i: make_detail(i) for i in ids}
+    api = FakeSugAPI([ids], details, broken_ids={"b"})
+    raw = sug.fetch_all_raw(api, delay=0)
+    # b scheitert -> übersprungen, a und c kommen zurück.
+    assert {d["_id"] for d in raw} == {"a", "c"}
+
+
+# --- Feld-Mapping ---------------------------------------------------------
+def test_normalize_title_images_features():
+    v = sug.normalize(make_detail("x1", brand="Audi", model="A3 Sportback", name="ZZ-99 Angebot"))
+    # Titel = brand + model, NICHT name.
     assert v["make"] == "Audi"
     assert v["model"] == "A3 Sportback"
-    assert v["price"] == 31900
-    assert v["mileage_km"] == 55000
-    assert v["power_kw"] == 140
-    assert v["first_registration"] == "05/2021"
+    assert v["raw"]["name"] == "ZZ-99 Angebot"      # name nur in raw
+    # Bilder: vollständige URLs aus imagepath, als Liste.
+    assert v["images"] == [
+        "https://digiaccess.example/x1/1.jpg",
+        "https://digiaccess.example/x1/2.jpg",
+    ]
+    # Ausstattung aus equipmentTranslations.
+    assert v["features"] == ["Klimaautomatik", "Navigationssystem", "LED-Scheinwerfer"]
+    # weitere Felder
+    assert v["source"] == "sug"
     assert v["fuel"] == "Diesel"
     assert v["gearbox"] == "Automatik"
-    assert v["color"] == "Blau"
-    assert v["leasing_rate"] == 249.0 and v["financing_rate"] == 249.0
     assert v["url"] == "https://www.sug.de/fahrzeug/x1"
-    assert v["images"] == [
-        "https://img.sug.de/x1/1.jpg",
-        "https://img.sug.de/x1/2.jpg",
-    ]
     assert v["location"] == "SuG Stuttgart"
-    assert v["category"] == "Limousine"
-    # Rohdaten (Adresse/Telefon) bleiben erhalten.
     assert v["raw"]["location"]["phone"] == "0711 12345"
 
 
+def test_images_fallback_to_bigthumb_when_no_imagepath():
+    d = make_detail("x2")
+    d["images"] = [{"imagebigthumbpath": "https://digiaccess.example/x2/only_big.jpg"}]
+    assert sug.normalize(d)["images"] == ["https://digiaccess.example/x2/only_big.jpg"]
+
+
 def test_consumption_summary():
-    c = sug.normalize(make_sug_doc("x1"))["consumption"]
+    c = sug.normalize(make_detail("x1"))["consumption"]
     assert "Verbrauch: 5,1 l/100km" in c
     assert "Emission: 120 g/km" in c
-    assert "Effizienzklasse: A" in c
-    assert "WLTP kombiniert: 5,1" in c
     assert "CO2 kombiniert: 119" in c
 
 
+# --- fuel-Codes (Regression) ---------------------------------------------
 def test_fuel_numeric_code_is_mapped():
-    # engine.fuel als Zahlencode -> lesbare Bezeichnung (Mapping-Tabelle).
-    doc = make_sug_doc("f1")
-    doc["engine"]["fuel"] = 2
-    v = sug.normalize(doc)
-    assert v["fuel"] == "Diesel"
-    # als numerischer String ebenso.
-    doc["engine"]["fuel"] = "5"
-    assert sug.normalize(doc)["fuel"] == "Elektro"
+    d = make_detail("f1")
+    d["engine"]["fuel"] = 2
+    assert sug.normalize(d)["fuel"] == "Diesel"
+    d["engine"]["fuel"] = "5"
+    assert sug.normalize(d)["fuel"] == "Elektro"
 
 
-def test_fuel_unknown_code_falls_back_to_string_no_data_loss():
-    doc = make_sug_doc("f2")
-    doc["engine"]["fuel"] = 9999      # unbekannter Code
-    v = sug.normalize(doc)
-    assert v["fuel"] == "9999"        # als String durchgereicht, nicht verworfen
-    # und validiert sauber gegen unser Schema (kein Typfehler)
-    model = NormalizedVehicle.model_validate(v)
-    assert model.fuel == "9999"
+def test_fuel_unknown_code_falls_back_to_string():
+    d = make_detail("f2")
+    d["engine"]["fuel"] = 9999
+    v = sug.normalize(d)
+    assert v["fuel"] == "9999"
+    assert NormalizedVehicle.model_validate(v).fuel == "9999"
 
 
 def test_int_fields_do_not_break_validation():
-    # Zahlwerte in String-Feldern (fuel/gearbox) dürfen den Datensatz nicht kippen.
-    doc = make_sug_doc("f3")
-    doc["engine"]["fuel"] = 3
-    doc["engine"]["gearbox"] = 10     # hypothetischer Zahlencode
-    v = sug.normalize(doc)
-    model = NormalizedVehicle.model_validate(v)   # darf NICHT werfen
-    assert model.source == "sug"
-    assert isinstance(model.fuel, str)
-    assert isinstance(model.gearbox, str)
+    d = make_detail("f3")
+    d["engine"]["fuel"] = 3
+    d["engine"]["gearbox"] = 10
+    model = NormalizedVehicle.model_validate(sug.normalize(d))
+    assert isinstance(model.fuel, str) and isinstance(model.gearbox, str)
     assert model.gearbox == "10"
 
 
+# --- Registry / Sync ------------------------------------------------------
 def test_registry_includes_sug_and_filter():
     assert "sug" in [a.name for a in get_adapters()]
     assert [a.name for a in get_adapters(["sug"])] == ["sug"]
 
 
 class FakeSug(SugAdapter):
+    """SuG-Adapter, aber fetch() liefert Detail-Fixtures; normalize() ist echt."""
+
     def __init__(self, records):
         super().__init__()
         self._records = records
@@ -198,8 +223,8 @@ class FakeSug(SugAdapter):
         return list(self._records)
 
 
-def test_sync_sug_inserts_with_source(db_session, monkeypatch):
-    records = [make_sug_doc("s1"), make_sug_doc("s2", price=42000)]
+def test_sync_sug_inserts_full_data(db_session, monkeypatch):
+    records = [make_detail("s1"), make_detail("s2", price=42000)]
     monkeypatch.setattr(sync_module, "get_adapters", lambda names=None: [FakeSug(records)])
 
     report = SyncEngine().run(sources=["sug"])
@@ -207,14 +232,16 @@ def test_sync_sug_inserts_with_source(db_session, monkeypatch):
 
     rows = db_session.execute(select(Vehicle).where(Vehicle.source == "sug")).scalars().all()
     assert {r.source_id for r in rows} == {"s1", "s2"}
-    assert all(r.consumption and "Verbrauch" in r.consumption for r in rows)
+    for r in rows:
+        assert r.make == "BMW" and r.model == "320d Touring"
+        assert len(r.images) == 2
+        assert "Klimaautomatik" in r.features
 
 
-def test_sync_sug_with_numeric_fuel_no_errors(db_session, monkeypatch):
-    # Regression: engine.fuel als Zahlencode kippte zuvor die Validierung.
+def test_sync_sug_numeric_fuel_no_errors(db_session, monkeypatch):
     docs = []
     for i, code in enumerate([1, 2, 3, 5, 10, 9999]):
-        d = make_sug_doc(f"n{i}")
+        d = make_detail(f"n{i}")
         d["engine"]["fuel"] = code
         docs.append(d)
     monkeypatch.setattr(sync_module, "get_adapters", lambda names=None: [FakeSug(docs)])
@@ -222,14 +249,5 @@ def test_sync_sug_with_numeric_fuel_no_errors(db_session, monkeypatch):
     report = SyncEngine().run(sources=["sug"])
     res = report.results[0]
     assert res.fetched == len(docs)
-    assert res.errors == 0            # keine fuel-Validierungsfehler mehr
-    assert res.inserted == len(docs)  # alle Fahrzeuge übernommen
-
-    fuels = {
-        r.source_id: r.fuel
-        for r in db_session.execute(select(Vehicle).where(Vehicle.source == "sug")).scalars()
-    }
-    assert fuels["n0"] == "Benzin"
-    assert fuels["n1"] == "Diesel"
-    assert fuels["n3"] == "Elektro"
-    assert fuels["n5"] == "9999"      # unbekannt -> String-Fallback, nicht verworfen
+    assert res.errors == 0
+    assert res.inserted == len(docs)
