@@ -40,9 +40,10 @@ DEFAULT_LIMIT = 50
 DETAIL_CONCURRENCY = 5       # max. gleichzeitige Detailabfragen
 DETAIL_DELAY = 0.15          # kleine Pause (s) je Detailabfrage
 
-# GraphQL-Typ der _id-Variable in der "Car"-Abfrage. Falls das Live-Schema
-# einen anderen Typ nutzt (z.B. "ID!"), hier anpassen.
-CAR_ID_GQL_TYPE = "String!"
+# GraphQL-Typ der _id-Variable in der "Car"-Abfrage. Das Live-Schema nutzt
+# ID! (die alphanumerischen _id-Werte wie "8523-00259" werden als String-Wert
+# übergeben, der GraphQL-Typ ist aber ID!).
+CAR_ID_GQL_TYPE = "ID!"
 
 HEADERS = {
     "Content-Type": "application/json",
