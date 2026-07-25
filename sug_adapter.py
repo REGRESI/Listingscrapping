@@ -24,6 +24,7 @@ Start:
 
 from __future__ import annotations
 import json
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -32,6 +33,16 @@ import httpx
 ENDPOINT = "https://api.sug-gebrauchtwagen.de/"
 DOMAIN = "https://www.sug.de"
 SOURCE = "sug"
+
+# Basis-URL des SuG-Bilddienstes. images[].imagepath ist nur ein RELATIVER
+# Pfad (z.B. "2026/07/10/20/43/2/original/20432_1.jpg"); diese Basis wird
+# davorgesetzt. Über die gleichnamige Umgebungsvariable überschreibbar.
+SUG_IMAGE_BASE_URL = os.environ.get(
+    "SUG_IMAGE_BASE_URL", "https://www.sug-verwaltung.de/public/images"
+)
+
+# Ausstattungs-Kategorien, die ignoriert werden (doppelte/unstrukturierte Werte).
+IGNORED_EQUIPMENT_CATEGORIES = {"Weitere Informationen"}
 
 # Stufe 1: Seitengröße der Listenabfrage. Über page paginiert.
 DEFAULT_LIMIT = 50
@@ -338,34 +349,90 @@ def _build_consumption(doc: dict) -> str | None:
     return " · ".join(parts) if parts else None
 
 
+def _full_image_url(path) -> str | None:
+    """Relativen imagepath zur vollständigen URL machen (genau EIN Schrägstrich
+    zwischen Basis und Pfad). Bereits absolute URLs bleiben unverändert."""
+    if not path:
+        return None
+    p = str(path).strip()
+    if not p:
+        return None
+    if p.startswith("http://") or p.startswith("https://"):
+        return p
+    return f"{SUG_IMAGE_BASE_URL.rstrip('/')}/{p.lstrip('/')}"
+
+
 def _extract_images(doc: dict) -> list[str]:
-    """Bild-URLs aus images übernehmen (imagepath bzw. imagebigthumbpath).
-    Es sind bereits vollständige digiaccess-URLs -> unverändert übernehmen."""
+    """Bild-URLs aus images übernehmen. imagepath (Vollauflösung) ist relativ
+    -> feste Basis-URL davorsetzen. Liste aller Bilder des Fahrzeugs."""
     out: list[str] = []
     for img in doc.get("images") or []:
         if isinstance(img, dict):
-            url = img.get("imagepath") or img.get("imagebigthumbpath")
+            url = _full_image_url(img.get("imagepath") or img.get("imagebigthumbpath"))
             if url:
-                out.append(str(url))
-        elif isinstance(img, str) and img.strip():
-            out.append(img.strip())
+                out.append(url)
+        elif isinstance(img, str):
+            url = _full_image_url(img)
+            if url:
+                out.append(url)
     return out
 
 
 def _extract_features(doc: dict) -> list[str]:
-    """equipmentTranslations in unser features-Feld übernehmen."""
+    """equipmentTranslations -> flache features-Liste.
+
+    Struktur ist verschachtelt: erst Sprache, dann Kategorie:
+        { "de": { "Komfort": [...], "Sicherheit": [...], ... } }
+    Wir nehmen den "de"-Block (sonst den ersten Sprachblock), iterieren über
+    alle Kategorien (außer den ignorierten) und führen alle Listenwerte zu
+    einer flachen Liste zusammen — Duplikate entfernt, Reihenfolge stabil.
+    """
     equip = doc.get("equipmentTranslations")
     out: list[str] = []
-    if isinstance(equip, list):
+    seen: set[str] = set()
+
+    def add(value) -> None:
+        if not isinstance(value, str):
+            return
+        s = value.strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    def add_categories(block: dict) -> None:
+        for category, values in block.items():
+            if category in IGNORED_EQUIPMENT_CATEGORIES:
+                continue
+            if isinstance(values, list):
+                for v in values:
+                    add(v)
+            elif isinstance(values, str):
+                add(values)
+
+    if isinstance(equip, dict):
+        block = equip.get("de")
+        if not isinstance(block, dict):
+            # "de" fehlt -> ersten verfügbaren Sprachblock nehmen.
+            block = next((v for v in equip.values() if isinstance(v, dict)), None)
+        if isinstance(block, dict):
+            add_categories(block)
+        else:
+            # Fallback: Sprache -> Liste (nicht nach Kategorie verschachtelt).
+            for v in equip.values():
+                if isinstance(v, list):
+                    for item in v:
+                        add(item)
+                else:
+                    add(v)
+    elif isinstance(equip, list):   # Rückwärtskompatibilität: flaches Array
         for e in equip:
-            if isinstance(e, str) and e.strip():
-                out.append(e.strip())
+            if isinstance(e, str):
+                add(e)
             elif isinstance(e, dict):
-                val = e.get("value") or e.get("name") or e.get("label") or e.get("translation")
-                if val:
-                    out.append(str(val).strip())
-    elif isinstance(equip, str) and equip.strip():
-        out.append(equip.strip())
+                add(e.get("value") or e.get("name") or e.get("label") or e.get("translation"))
+    elif isinstance(equip, str):
+        add(equip)
+
     return out
 
 

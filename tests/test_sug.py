@@ -173,6 +173,63 @@ def test_images_fallback_to_bigthumb_when_no_imagepath():
     assert sug.normalize(d)["images"] == ["https://digiaccess.example/x2/only_big.jpg"]
 
 
+def test_relative_imagepath_gets_base_url_single_slash():
+    d = make_detail("x3")
+    d["images"] = [
+        {"imagepath": "2026/07/10/20/43/2/original/20432_1.jpg"},
+        {"imagepath": "2026/07/10/20/43/2/original/20432_2.jpg"},
+    ]
+    urls = sug.normalize(d)["images"]
+    assert urls == [
+        "https://www.sug-verwaltung.de/public/images/2026/07/10/20/43/2/original/20432_1.jpg",
+        "https://www.sug-verwaltung.de/public/images/2026/07/10/20/43/2/original/20432_2.jpg",
+    ]
+    # kein doppelter Schrägstrich zwischen Basis und Pfad
+    assert "public/images//" not in urls[0]
+
+
+def test_full_image_url_helper_no_double_slash():
+    # Basis ohne, Pfad mit führendem Slash -> trotzdem genau ein Slash
+    assert sug._full_image_url("/a/b.jpg") == "https://www.sug-verwaltung.de/public/images/a/b.jpg"
+    # bereits absolute URL bleibt unverändert
+    assert sug._full_image_url("https://x/y.jpg") == "https://x/y.jpg"
+    assert sug._full_image_url(None) is None
+
+
+NESTED_EQUIPMENT = {
+    "de": {
+        "Komfort": ["Klimaanlage", "elektrische Fensterheber", "Sitzheizung"],
+        "Sicherheit": ["ABS", "ESP", "ABS"],           # Duplikat innerhalb
+        "Exterieur": ["LED-Scheinwerfer"],
+        "Media": ["Navigationssystem", "Klimaanlage"],  # Duplikat kategorieübergreifend
+        "Weitere Informationen": ["Klimaanlage", "irgendein Dubletten-Text"],  # ignoriert
+    }
+}
+
+
+def test_nested_equipment_flattened_dedup_stable():
+    d = make_detail("e1")
+    d["equipmentTranslations"] = NESTED_EQUIPMENT
+    feats = sug.normalize(d)["features"]
+    assert feats == [
+        "Klimaanlage",
+        "elektrische Fensterheber",
+        "Sitzheizung",
+        "ABS",
+        "ESP",
+        "LED-Scheinwerfer",
+        "Navigationssystem",
+    ]
+    # "Weitere Informationen" wurde ignoriert (kein zusätzlicher Dubletten-Text)
+    assert "irgendein Dubletten-Text" not in feats
+
+
+def test_equipment_language_fallback_when_no_de():
+    d = make_detail("e2")
+    d["equipmentTranslations"] = {"en": {"Comfort": ["Air conditioning", "Heated seats"]}}
+    assert sug.normalize(d)["features"] == ["Air conditioning", "Heated seats"]
+
+
 def test_consumption_summary():
     c = sug.normalize(make_detail("x1"))["consumption"]
     assert "Verbrauch: 5,1 l/100km" in c
