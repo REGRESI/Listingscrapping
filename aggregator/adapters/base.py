@@ -37,8 +37,20 @@ class SourceAdapter(ABC):
         """Einen Rohdatensatz in das einheitliche (dict-)Schema übersetzen."""
         raise NotImplementedError
 
+    def slim_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Kompakte Teilmenge des raw-Feldes für die Speicherung.
+
+        Standard: nichts speichern ({}) — alle Anzeigefelder stehen in den
+        Tabellenspalten, das volle raw ist der größte Speicherfresser. Adapter,
+        die gezielt Zusatzdaten behalten wollen (z.B. SuG: Adresse/Telefon +
+        deutscher Ausstattungsblock), überschreiben diese Methode.
+        """
+        return {}
+
     def normalize_validated(self, raw: dict[str, Any]) -> NormalizedVehicle:
-        """normalize() + pydantic-Validierung. Stellt `source` sicher."""
+        """normalize() + pydantic-Validierung. Stellt `source` sicher und
+        speichert nur ein verschlanktes raw."""
         data = self.normalize(raw)
         data.setdefault("source", self.name)
+        data["raw"] = self.slim_raw(data.get("raw") or {})
         return NormalizedVehicle.model_validate(data)

@@ -436,6 +436,35 @@ def _extract_features(doc: dict) -> list[str]:
     return out
 
 
+def slim_raw(doc: dict) -> dict:
+    """Kompaktes raw für die Speicherung: NUR der deutsche Ausstattungsblock
+    (nicht alle Sprachen) plus der reichhaltige Standort (Adresse/Telefon für
+    spätere Anzeige) und ein paar Referenzfelder. Alle Anzeigefelder stehen
+    ohnehin in den Tabellenspalten — der Rest der Rohantwort (andere Sprachen,
+    wltp, name, ...) wird nicht gespeichert."""
+    if not isinstance(doc, dict):
+        return {}
+    slim: dict = {}
+
+    equip = doc.get("equipmentTranslations")
+    if isinstance(equip, dict):
+        de = equip.get("de")
+        if not isinstance(de, dict):
+            de = next((v for v in equip.values() if isinstance(v, dict)), None)
+        if isinstance(de, dict):
+            slim["equipmentTranslations"] = {"de": de}
+
+    loc = doc.get("location")
+    if isinstance(loc, dict):
+        slim["location"] = loc
+
+    for key in ("_id", "uid", "link"):
+        if doc.get(key) is not None:
+            slim[key] = doc.get(key)
+
+    return slim
+
+
 def _build_title_model(doc: dict) -> str | None:
     """Titel-Basis = brand + model (NICHT das kryptische name-Feld). Wir liefern
     hier den model-Anteil; make (brand) steht separat im Schema, die Webseite

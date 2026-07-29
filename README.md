@@ -167,6 +167,50 @@ WantedBy=multi-user.target
 
 ---
 
+## Speicher-Wartung
+
+Damit die Datenbank (z.B. Railways 500-MB-Volume) nicht vollläuft:
+
+- **Kein volles `raw` mehr:** Alle Anzeigefelder (Titel, Preis, Bilder,
+  Ausstattung, Verbrauch …) stehen in eigenen Spalten. Das `raw`-Feld — früher
+  der größte Verbraucher — wird beim Speichern verschlankt: für bhg/ahg gar
+  nicht mehr gespeichert (`{}`), für SuG nur der **deutsche** Ausstattungsblock
+  plus Standort (Adresse/Telefon), nicht alle Sprachen. Die Anzeige ändert sich
+  dadurch nicht.
+- **Aufräumen inaktiver Fahrzeuge:** verkaufte Fahrzeuge werden zunächst nur auf
+  `active=false` gesetzt (nie sofort gelöscht). Die Maintenance löscht solche,
+  die seit > 30 Tagen nicht mehr gesehen wurden (`last_seen_at`), und gibt per
+  `VACUUM (FULL)` den Speicher ans Dateisystem zurück.
+
+```bash
+python -m aggregator.maintenance              # löschen (>30 T) + raw slim + VACUUM FULL
+python -m aggregator.maintenance --days 14    # andere Aufbewahrungsdauer
+python -m aggregator.maintenance --no-slim --no-vacuum
+```
+
+Der Lauf zeigt Datenbank- und Tabellengröße **vorher und nachher** sowie die
+durchschnittliche `raw`-Größe je Quelle. Aufbewahrungsdauer auch über
+`INACTIVE_RETENTION_DAYS` (`.env`) einstellbar.
+
+> Hinweis: Nach dem Deploy dieser Version werden aktive Fahrzeuge beim nächsten
+> Sync automatisch mit verschlanktem `raw` überschrieben; einmal
+> `python -m aggregator.maintenance` verschlankt zusätzlich die bereits
+> gespeicherten Alt-Datensätze sofort und gibt den Speicher frei.
+
+**Als täglicher Cron** (System-Cron):
+
+```cron
+# Speicher-Wartung täglich um 03:30
+30 3 * * * cd /opt/regresi/listingscrapping && /opt/regresi/listingscrapping/.venv/bin/python -m aggregator.maintenance >> /var/log/regresi-maintenance.log 2>&1
+```
+
+Auf **Railway** als eigener Cron-Dienst (analog zum Sync): dasselbe Repo,
+`DATABASE_URL` = `${{ Postgres.DATABASE_URL }}`, **Custom Start Command**
+`python -m aggregator.maintenance`, **Cron Schedule** z.B. `30 3 * * *`.
+`VACUUM FULL` sperrt die Tabelle kurz — außerhalb der Stoßzeiten einplanen.
+
+---
+
 ## Deployment auf Railway
 
 Das Repo enthält `nixpacks.toml` (Build + Default-Startbefehl) und `.python-version`.

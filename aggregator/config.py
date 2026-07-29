@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     fetch_retry_backoff: float = Field(
         default=2.0, description="Basis für exponentielles Backoff (Sekunden)."
     )
+    # Aufräumen: inaktive Fahrzeuge, die seit so vielen Tagen nicht mehr gesehen
+    # wurden (last_seen_at), werden von der Maintenance endgültig gelöscht.
+    inactive_retention_days: int = Field(
+        default=30, description="Inaktive Fahrzeuge nach so vielen Tagen löschen."
+    )
 
     # --- Scheduler -------------------------------------------------------
     schedule_cron: str = Field(

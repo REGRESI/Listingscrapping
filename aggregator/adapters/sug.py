@@ -101,3 +101,8 @@ class SugAdapter(SourceAdapter):
     # -- normalize ------------------------------------------------------
     def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
         return _sug.normalize(raw)
+
+    # -- slim_raw -------------------------------------------------------
+    def slim_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Nur deutscher Ausstattungsblock + Standort (Adresse/Telefon)."""
+        return _sug.slim_raw(raw)
